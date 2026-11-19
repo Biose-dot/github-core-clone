@@ -18,6 +18,9 @@
 
 import { createApp } from './app.ts';
 
+/** The forge's name, printed once at startup so the trial log names the entry. */
+const FORGE_NAME = 'Forge';
+
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
 if (ENV_URL === '') {
   process.stderr.write('[entry] MAKEFUN_ENV_URL is not set: there is no env to register with\n');
@@ -89,6 +92,7 @@ async function main(): Promise<void> {
 
   await register(address.port);
   process.stdout.write('[entry] registered; waiting for the env to say done\n');
+  process.stdout.write(`[${FORGE_NAME}] serving smart HTTP, REST v3, GraphQL v4 and MCP\n`);
 
   await waitForDone();
   server.close();
