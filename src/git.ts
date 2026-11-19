@@ -217,11 +217,12 @@ interface FetchRequest {
   haves: string[];
   clientShallow: string[];
   depth: number | null;
+  deepenRelative: boolean;
   done: boolean;
 }
 
 function parseFetch(packets: Packet[]): FetchRequest {
-  const request: FetchRequest = { wants: [], haves: [], clientShallow: [], depth: null, done: false };
+  const request: FetchRequest = { wants: [], haves: [], clientShallow: [], depth: null, deepenRelative: false, done: false };
   for (const packet of packets) {
     if (packet.kind !== 'data') continue;
     const line = packet.payload.toString('utf8').replace(/\n$/, '');
@@ -229,6 +230,7 @@ function parseFetch(packets: Packet[]): FetchRequest {
     else if (line.startsWith('have ')) request.haves.push(line.slice(5).trim());
     else if (line.startsWith('shallow ')) request.clientShallow.push(line.slice(8).trim());
     else if (line.startsWith('deepen ')) request.depth = Number(line.slice(7).trim());
+    else if (line === 'deepen-relative') request.deepenRelative = true;
     else if (line === 'done') request.done = true;
   }
   return request;
@@ -256,6 +258,27 @@ function planFetch(repo: Repo, request: FetchRequest): FetchPlan {
   const haves = new Set(request.haves.filter((oid) => repo.get(oid)));
   const clientShallow = new Set(request.clientShallow.filter((oid) => repo.get(oid)));
   const shallowClient = clientShallow.size > 0;
+  // deepen-relative (real git's deepen): the depth counts from the client's current boundary, so
+  // the effective cap is the requested depth plus the boundary's distance from the wants.
+  let depthCap = request.depth;
+  if (request.deepenRelative && request.depth !== null && shallowClient) {
+    let boundaryDistance = 0;
+    const seen = new Set<string>();
+    const probe: Array<{ oid: string; level: number }> = wants.map((oid) => ({ oid, level: 1 }));
+    while (probe.length) {
+      const { oid, level } = probe.shift()!;
+      if (seen.has(oid)) continue;
+      seen.add(oid);
+      if (clientShallow.has(oid)) {
+        boundaryDistance = level;
+        break;
+      }
+      const object = repo.get(oid);
+      if (!object || object.type !== 'commit') continue;
+      for (const parent of parseCommitData(object.data).parents) probe.push({ oid: parent, level: level + 1 });
+    }
+    depthCap = request.depth + boundaryDistance;
+  }
   const included = new Set<string>();
   const queue: Array<{ oid: string; level: number }> = wants.map((oid) => ({ oid, level: 1 }));
   while (queue.length) {
@@ -271,7 +294,7 @@ function planFetch(repo: Repo, request: FetchRequest): FetchPlan {
     if (object.type !== 'commit') continue;
     if (!shallowClient && haves.has(oid) && !wantSet.has(oid)) continue; // the have barrier
     included.add(oid);
-    if (request.depth !== null && level >= request.depth) continue;
+    if (depthCap !== null && level >= depthCap) continue;
     if (request.depth === null && shallowClient && clientShallow.has(oid)) continue; // boundary holds
     for (const parent of parseCommitData(object.data).parents) {
       queue.push({ oid: parent, level: level + 1 });
@@ -335,9 +358,18 @@ function sidebandPackets(pack: Buffer): Buffer[] {
 }
 
 function fetchV2(repo: Repo, request: FetchRequest): Buffer {
+  const havesPresent = request.haves.filter((oid) => repo.get(oid));
+  // Negotiation round: without `done` the client is still offering haves, and the whole answer is
+  // the acknowledgments section — real git refuses any further section in this response.
+  if (!request.done) {
+    const parts: Buffer[] = [pktLine('acknowledgments\n')];
+    if (havesPresent.length === 0) parts.push(pktLine('NAK\n'));
+    else for (const oid of havesPresent) parts.push(pktLine(`ACK ${oid}\n`));
+    parts.push(PKT_DELIM, PKT_FLUSH);
+    return Buffer.concat(parts);
+  }
   const plan = planFetch(repo, request);
   const parts: Buffer[] = [];
-  const havesPresent = request.haves.filter((oid) => repo.get(oid));
   if (request.haves.length > 0) {
     parts.push(pktLine('acknowledgments\n'));
     if (havesPresent.length === 0) parts.push(pktLine('NAK\n'));
