@@ -342,6 +342,8 @@ function fetchV2(repo: Repo, request: FetchRequest): Buffer {
     parts.push(pktLine('acknowledgments\n'));
     if (havesPresent.length === 0) parts.push(pktLine('NAK\n'));
     else for (const oid of havesPresent) parts.push(pktLine(`ACK ${oid}\n`));
+    // A client that sent `done` is owed a `ready`: real git refuses any further section without it.
+    if (request.done) parts.push(pktLine('ready\n'));
     parts.push(PKT_DELIM);
   }
   if (request.depth !== null || request.clientShallow.length > 0) {
