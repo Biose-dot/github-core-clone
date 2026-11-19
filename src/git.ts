@@ -239,6 +239,7 @@ function parseFetch(packets: Packet[]): FetchRequest {
 interface FetchPlan {
   objects: GitObj[];
   shallow: string[];
+  unshallow: string[];
 }
 
 /**
@@ -301,7 +302,10 @@ function planFetch(repo: Repo, request: FetchRequest): FetchPlan {
     }
   }
   // The boundary: included commits with a parent that is neither included nor already held.
+  // The old boundary commits that are included now but no longer on the boundary are unshallowed:
+  // the client must be told, or it keeps treating them as cut points.
   const shallow: string[] = [];
+  const unshallow: string[] = [];
   if (request.depth !== null || shallowClient) {
     for (const oid of included) {
       const object = repo.get(oid);
@@ -309,6 +313,8 @@ function planFetch(repo: Repo, request: FetchRequest): FetchPlan {
       const parents = parseCommitData(object.data).parents;
       if (parents.length > 0 && parents.some((parent) => !included.has(parent) && !haves.has(parent) && !clientShallow.has(parent))) {
         shallow.push(oid);
+      } else if (clientShallow.has(oid)) {
+        unshallow.push(oid);
       }
     }
   }
@@ -344,7 +350,7 @@ function planFetch(repo: Repo, request: FetchRequest): FetchPlan {
   // Commits first, then trees, then blobs: a friendly order for index-pack.
   const rank = { commit: 0, tag: 1, tree: 2, blob: 3 } as const;
   objects.sort((a, b) => rank[a.type] - rank[b.type]);
-  return { objects, shallow };
+  return { objects, shallow, unshallow };
 }
 
 /** Chunk a pack into sideband-1 pkt-lines of at most 65520 bytes. */
@@ -381,6 +387,7 @@ function fetchV2(repo: Repo, request: FetchRequest): Buffer {
   if (request.depth !== null || request.clientShallow.length > 0) {
     parts.push(pktLine('shallow-info\n'));
     for (const oid of plan.shallow) parts.push(pktLine(`shallow ${oid}\n`));
+    for (const oid of plan.unshallow) parts.push(pktLine(`unshallow ${oid}\n`));
     parts.push(PKT_DELIM);
   }
   parts.push(pktLine('packfile\n'));
@@ -393,6 +400,7 @@ function fetchV0(repo: Repo, request: FetchRequest): Buffer {
   const plan = planFetch(repo, request);
   const parts: Buffer[] = [];
   for (const oid of plan.shallow) parts.push(pktLine(`shallow ${oid}\n`));
+  for (const oid of plan.unshallow) parts.push(pktLine(`unshallow ${oid}\n`));
   parts.push(pktLine('NAK\n'));
   parts.push(...sidebandPackets(writePack(plan.objects)));
   parts.push(PKT_FLUSH);
