@@ -359,14 +359,13 @@ function sidebandPackets(pack: Buffer): Buffer[] {
 
 function fetchV2(repo: Repo, request: FetchRequest): Buffer {
   const havesPresent = request.haves.filter((oid) => repo.get(oid));
-  // Negotiation round: without `done` the client is still offering haves, and the whole answer is
-  // the acknowledgments section — real git refuses any further section in this response.
-  if (!request.done) {
-    const parts: Buffer[] = [pktLine('acknowledgments\n')];
-    if (havesPresent.length === 0) parts.push(pktLine('NAK\n'));
-    else for (const oid of havesPresent) parts.push(pktLine(`ACK ${oid}\n`));
-    parts.push(PKT_DELIM, PKT_FLUSH);
-    return Buffer.concat(parts);
+  // Negotiation: when the client has not said `done` and none of its haves are known here,
+  // negotiation cannot complete — the whole answer is a NAK acknowledgments section and the
+  // client will offer more haves. When at least one have is known (or the client said `done`),
+  // negotiation completes in this response, exactly as git's own upload-pack behaves: the
+  // acknowledgments carry `ready` and the packfile sections follow in the same response.
+  if (!request.done && request.haves.length > 0 && havesPresent.length === 0) {
+    return Buffer.concat([pktLine('acknowledgments\n'), pktLine('NAK\n'), PKT_FLUSH]);
   }
   const plan = planFetch(repo, request);
   const parts: Buffer[] = [];
@@ -374,8 +373,9 @@ function fetchV2(repo: Repo, request: FetchRequest): Buffer {
     parts.push(pktLine('acknowledgments\n'));
     if (havesPresent.length === 0) parts.push(pktLine('NAK\n'));
     else for (const oid of havesPresent) parts.push(pktLine(`ACK ${oid}\n`));
-    // A client that sent `done` is owed a `ready`: real git refuses any further section without it.
-    if (request.done) parts.push(pktLine('ready\n'));
+    // The packfile sections follow, so the acknowledgments must close with `ready`: real git
+    // refuses any further section after an acknowledgments section that lacked it.
+    parts.push(pktLine('ready\n'));
     parts.push(PKT_DELIM);
   }
   if (request.depth !== null || request.clientShallow.length > 0) {
